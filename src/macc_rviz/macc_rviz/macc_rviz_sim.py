@@ -1,4 +1,5 @@
 import hashlib
+import random
 import time
 
 import numpy as np
@@ -102,6 +103,39 @@ def bfs_path(start, goal, hm):
     return path
 
 
+def bfs_to_boundary(start, hm):
+    """Multi-goal BFS: shortest path from start to any grid boundary cell.
+
+    A boundary cell is one where x==0, x==X-1, y==0, or y==Y-1.
+    Returns the path as a list of (x, y) tuples (inclusive of start and goal),
+    or None if no path exists.
+    """
+    Y, X = hm.shape
+    sx, sy = start
+    if sx == 0 or sx == X - 1 or sy == 0 or sy == Y - 1:
+        return [start]   # already on boundary
+    q = [(sx, sy)]
+    prev = {(sx, sy): None}
+    while q:
+        x, y = q.pop(0)
+        if x == 0 or x == X - 1 or y == 0 or y == Y - 1:
+            path, cur = [], (x, y)
+            while cur is not None:
+                path.append(cur)
+                cur = prev[cur]
+            path.reverse()
+            return path
+        for nx, ny in neighbors4(x, y):
+            if not in_bounds(nx, ny, X, Y):
+                continue
+            if (nx, ny) in prev:
+                continue
+            if abs(int(hm[ny, nx]) - int(hm[y, x])) <= 1:
+                prev[(nx, ny)] = (x, y)
+                q.append((nx, ny))
+    return None
+
+
 def surface_z(hm, x, y):
     return int(hm[y, x])
 
@@ -134,6 +168,7 @@ class Robot:
         self.z = 0
         self.carrying = False
         self.carrying_si = -1   # substructure index of block being carried
+        self.wait_streak = 0    # consecutive ticks this robot has waited (deadlock detector)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +280,9 @@ class MACCRvizSim(Node):
         # Return-to-boundary state (used after build completes)
         self.build_complete = False
         self.return_paths = {}
+        self.return_done = set()        # robot IDs that have exited the grid
+        self.return_start_tick = None   # tick at which return phase began (for timeout)
+        self.return_delay = {}          # robot_id → stagger delay in ticks (FIX 3)
 
         # --- intro stage state machine ---
         self.stage = _STAGE_INPUT
@@ -252,6 +290,9 @@ class MACCRvizSim(Node):
 
         # --- simulation timer — period = step_duration_sec directly, no divisors ---
         self.timer = self.create_timer(self.step_duration_sec, self.tick)
+
+        # --- tick counter (used for collision-avoidance log messages) ---
+        self.tick_count = 0
 
         block_count = int(self.target.sum())
         grid_hash = hashlib.md5(self.target.tobytes()).hexdigest()[:8]
@@ -261,12 +302,17 @@ class MACCRvizSim(Node):
             f"Structure: {block_count} blocks, fingerprint={grid_hash} "
             f"(shape Z,Y,X={self.target.shape})"
         )
+        self.get_logger().info(f"Robots: {num_robots} (priority order = robot id)")
         self.get_logger().info(f"Substructures: {len(self.substructures)}")
         self.get_logger().info(f"Parallel groups: {self.groups}")
         self.get_logger().info(f"Build order: {self.order}")
         self.get_logger().info(
             f"Step duration: {self.step_duration_sec:.2f}s "
             f"(STEP_DURATION_SEC={STEP_DURATION_SEC})"
+        )
+        self.get_logger().info(
+            "Collision avoidance: priority-based reservation table "
+            "(vertex + swap + carried-block, jiggle after 3 waits)"
         )
 
     # ------------------------------------------------------------------
@@ -582,6 +628,260 @@ class MACCRvizSim(Node):
         return path_state["path_i"] >= len(path)
 
     # ------------------------------------------------------------------
+    # Collision-aware movement (priority-based reservation table)
+    # ------------------------------------------------------------------
+
+    def _try_move(self, r, hm, path_state, reservations, committed_moves, t):
+        """
+        Advance robot r one step along path_state["path"] with collision
+        avoidance via the running reservation table.
+
+        Robots are processed in priority order (ascending robot id) within
+        each tick; earlier robots' committed moves are visible to later ones.
+
+        Checks:
+          - Vertex conflict: target cell already reserved by another robot.
+          - Swap conflict: another robot already committed the reverse move.
+          - Carried-block conflict: robot's carried block would land on a
+            reserved cell (i.e. target (x,y,z+1) is taken).
+
+        On conflict the robot waits this tick and its wait_streak is
+        incremented.  If wait_streak > 5, _try_jiggle is called to break
+        potential deadlocks.
+
+        Returns True if the robot moved (or path is already exhausted),
+        False if the robot waited this tick.
+        """
+        path = path_state["path"]
+        i = path_state["path_i"]
+        if path is None or i >= len(path):
+            return True  # nothing left to do; caller treats as "done"
+
+        nx, ny = path[i]
+        nz = surface_z(hm, nx, ny)
+
+        # Stale-path guard: the world may have grown since BFS was computed.
+        if abs(nz - r.z) > 1:
+            path_state["path"] = None
+            path_state["path_i"] = 0
+            r.wait_streak += 1
+            return False
+
+        target_cell = (nx, ny, nz)
+
+        # ---- Vertex conflict ------------------------------------------------
+        blocker = reservations.get(target_cell)
+        if blocker is not None and blocker != r.id:
+            self.get_logger().info(
+                f"[t={t}] Robot {r.id} waited (vertex conflict with "
+                f"Robot {blocker} at {target_cell})"
+            )
+            r.wait_streak += 1
+            self._try_jiggle(r, hm, path_state, reservations, committed_moves, t)
+            return False
+
+        # ---- Swap conflict --------------------------------------------------
+        for other_id, (from_xy, to_xy) in committed_moves.items():
+            if from_xy == (nx, ny) and to_xy == (r.x, r.y):
+                self.get_logger().info(
+                    f"[t={t}] Robot {r.id} waited (swap conflict with "
+                    f"Robot {other_id} between ({r.x},{r.y}) and ({nx},{ny}))"
+                )
+                r.wait_streak += 1
+                self._try_jiggle(
+                    r, hm, path_state, reservations, committed_moves, t
+                )
+                return False
+
+        # ---- Carried-block conflict -----------------------------------------
+        if r.carrying:
+            carry_cell = (nx, ny, nz + 1)
+            carry_blocker = reservations.get(carry_cell)
+            if carry_blocker is not None and carry_blocker != r.id:
+                self.get_logger().info(
+                    f"[t={t}] Robot {r.id} waited (carried-block conflict at "
+                    f"{carry_cell} with Robot {carry_blocker})"
+                )
+                r.wait_streak += 1
+                self._try_jiggle(
+                    r, hm, path_state, reservations, committed_moves, t
+                )
+                return False
+
+        # ---- All clear — commit the move ------------------------------------
+        reservations.pop((r.x, r.y, r.z), None)
+        if r.carrying:
+            reservations.pop((r.x, r.y, r.z + 1), None)
+
+        committed_moves[r.id] = ((r.x, r.y), (nx, ny))
+        r.x, r.y, r.z = nx, ny, nz
+        path_state["path_i"] = i + 1
+
+        reservations[(r.x, r.y, r.z)] = r.id
+        if r.carrying:
+            reservations[(r.x, r.y, r.z + 1)] = r.id
+
+        r.wait_streak = 0
+        return True
+
+    def _try_jiggle(self, r, hm, path_state, reservations, committed_moves, t):
+        """
+        If robot r has been stuck for more than 5 consecutive ticks, move it
+        to any free adjacent cell to break a potential deadlock, then force a
+        BFS replan on the next tick.
+
+        The jiggle itself obeys vertex and swap rules against already-committed
+        moves so it cannot create a new conflict.
+        """
+        if r.wait_streak <= 2:
+            return
+
+        candidates = list(neighbors4(r.x, r.y))
+        random.shuffle(candidates)
+
+        for jx, jy in candidates:
+            if not in_bounds(jx, jy, self.X, self.Y):
+                continue
+            jz = surface_z(hm, jx, jy)
+            if abs(jz - r.z) > 1:
+                continue
+            jcell = (jx, jy, jz)
+            # Cell must be free of other robots
+            if reservations.get(jcell, r.id) != r.id:
+                continue
+            # No swap conflict with already-committed moves
+            if any(
+                from_xy == (jx, jy) and to_xy == (r.x, r.y)
+                for _, (from_xy, to_xy) in committed_moves.items()
+            ):
+                continue
+
+            self.get_logger().info(
+                f"[t={t}] Robot {r.id} JIGGLE to ({jx},{jy},{jz}) "
+                f"(deadlock breaker after {r.wait_streak} waits)"
+            )
+            reservations.pop((r.x, r.y, r.z), None)
+            if r.carrying:
+                reservations.pop((r.x, r.y, r.z + 1), None)
+
+            committed_moves[r.id] = ((r.x, r.y), (jx, jy))
+            r.x, r.y, r.z = jx, jy, jz
+
+            reservations[(r.x, r.y, r.z)] = r.id
+            if r.carrying:
+                reservations[(r.x, r.y, r.z + 1)] = r.id
+
+            r.wait_streak = 0
+            path_state["path"] = None   # force BFS replan from jiggled position
+            path_state["path_i"] = 0
+            return
+
+    def _replan_after_detour(self, r, hm, state, t):
+        """
+        Immediately replan r's path from its current position after a jiggle or
+        forced detour.  Returns True if a path was found and set, False if no path
+        exists (caller should drop the task and re-queue it).
+        """
+        phase = state["phase"]
+        if phase == "to_pickup":
+            goal = state["pickup_cell"]
+            p = bfs_path((r.x, r.y), goal, hm)
+            if p is not None:
+                state["path"] = p
+                state["path_i"] = 0
+                self.get_logger().info(
+                    f"[t={t}] Robot {r.id} replanned "
+                    f"({r.x},{r.y})→{goal} ({len(p) - 1} steps)"
+                )
+                return True
+            self.get_logger().info(
+                f"[t={t}] Robot {r.id} no path from ({r.x},{r.y}) "
+                f"to pickup {goal} — dropping task"
+            )
+            return False
+
+        elif phase == "to_place":
+            x, y, z, _si = state["task"]
+            cands = [
+                (nx, ny)
+                for nx, ny in neighbors4(x, y)
+                if in_bounds(nx, ny, self.X, self.Y)
+                and abs(int(hm[ny, nx]) - z) <= 1
+            ]
+            if not cands:
+                self.get_logger().info(
+                    f"[t={t}] Robot {r.id} no placement candidates "
+                    "after detour — dropping task"
+                )
+                return False
+            goal = min(cands, key=lambda c: abs(c[0] - r.x) + abs(c[1] - r.y))
+            p = bfs_path((r.x, r.y), goal, hm)
+            if p is not None:
+                state["path"] = p
+                state["path_i"] = 0
+                self.get_logger().info(
+                    f"[t={t}] Robot {r.id} replanned "
+                    f"({r.x},{r.y})→{goal} ({len(p) - 1} steps)"
+                )
+                return True
+            self.get_logger().info(
+                f"[t={t}] Robot {r.id} no path from ({r.x},{r.y}) "
+                f"to placement {goal} — dropping task"
+            )
+            return False
+
+        # pickup / place phases don't navigate — nothing to replan
+        state["path"] = None
+        state["path_i"] = 0
+        return True
+
+    def _execute_forced_detour(self, r, hm, state, reservations, committed_moves, t):
+        """
+        Move r to any free adjacent cell this tick to resolve a swap conflict.
+        Returns 'ok' (detoured + replanned), 'drop' (detoured but no replan path
+        — caller should drop task), or 'wait' (no free cell, robot waits).
+        """
+        candidates = list(neighbors4(r.x, r.y))
+        random.shuffle(candidates)
+        for jx, jy in candidates:
+            if not in_bounds(jx, jy, self.X, self.Y):
+                continue
+            jz = surface_z(hm, jx, jy)
+            if abs(jz - r.z) > 1:
+                continue
+            jcell = (jx, jy, jz)
+            if reservations.get(jcell, r.id) != r.id:
+                continue
+            if any(
+                fxy == (jx, jy) and txy == (r.x, r.y)
+                for _, (fxy, txy) in committed_moves.items()
+            ):
+                continue
+            # Detour cell found
+            self.get_logger().info(
+                f"[t={t}] Robot {r.id} DETOUR to ({jx},{jy},{jz}) "
+                "(swap-conflict resolution)"
+            )
+            reservations.pop((r.x, r.y, r.z), None)
+            if r.carrying:
+                reservations.pop((r.x, r.y, r.z + 1), None)
+            committed_moves[r.id] = ((r.x, r.y), (jx, jy))
+            r.x, r.y, r.z = jx, jy, jz
+            reservations[(r.x, r.y, r.z)] = r.id
+            if r.carrying:
+                reservations[(r.x, r.y, r.z + 1)] = r.id
+            r.wait_streak = 0
+            ok = self._replan_after_detour(r, hm, state, t)
+            return 'ok' if ok else 'drop'
+
+        # No free adjacent cell found — robot waits this tick
+        self.get_logger().info(
+            f"[t={t}] Robot {r.id} swap-detour blocked (no free cell) — waiting"
+        )
+        r.wait_streak += 1
+        return 'wait'
+
+    # ------------------------------------------------------------------
     # Main timer callback — state machine
     # ------------------------------------------------------------------
 
@@ -642,21 +942,144 @@ class MACCRvizSim(Node):
         # Return-to-boundary phase (after build complete and final pause)
         if self.build_complete:
             hm = heightmap(self.world)
-            all_home = True
+            self.tick_count += 1
+            t = self.tick_count
+
+            # FIX 3: On the very first tick of the return phase, assign stagger
+            # delays so robots release one tick apart, closest-to-boundary first.
+            if self.return_start_tick is None:
+                self.return_start_tick = t
+
+                def _dist_to_boundary(r):
+                    return min(r.x, self.X - 1 - r.x, r.y, self.Y - 1 - r.y)
+
+                sorted_r = sorted(self.robots, key=_dist_to_boundary)
+                for delay, r in enumerate(sorted_r):
+                    self.return_delay[r.id] = delay
+
+            # FIX 5: Hard timeout — teleport any remaining robots to their
+            # nearest boundary cell and mark them done.
+            pending = [r for r in self.robots if r.id not in self.return_done]
+            timeout_ticks = len(self.robots) * 20
+            if pending and (t - self.return_start_tick) > timeout_ticks:
+                for r in pending:
+                    options = [
+                        (0, r.y), (self.X - 1, r.y),
+                        (r.x, 0), (r.x, self.Y - 1),
+                    ]
+                    bx, by = min(
+                        options,
+                        key=lambda c: abs(c[0] - r.x) + abs(c[1] - r.y)
+                    )
+                    self.return_done.add(r.id)
+                    # Park just outside the grid on whichever side was chosen.
+                    r.x = bx - 2 if bx == 0 else (bx + 2 if bx == self.X - 1 else bx)
+                    r.y = by - 2 if by == 0 else (by + 2 if by == self.Y - 1 else by)
+                    r.z = 0
+                self.get_logger().warning(
+                    f"[WARN] Return phase timed out, "
+                    f"teleporting {len(pending)} robots to boundary."
+                )
+                self.publish_robots()
+                self.get_logger().info(
+                    "Construction complete. All robots returned to boundary."
+                )
+                self.timer.cancel()
+                return
+
+            # FIX 2: Reservation table contains only robots still inside the grid.
+            reservations = {
+                (r.x, r.y, r.z): r.id
+                for r in self.robots
+                if r.id not in self.return_done
+            }
+            committed_moves = {}
+
+            def _mark_done(r):
+                """Mark robot r as having exited; park it off-grid."""
+                reservations.pop((r.x, r.y, r.z), None)
+                self.return_done.add(r.id)
+                remaining = sum(
+                    1 for ro in self.robots if ro.id not in self.return_done
+                )
+                self.get_logger().info(
+                    f"[t={t}] Robot {r.id} reached boundary at "
+                    f"({r.x},{r.y},{r.z}), marked DONE. "
+                    f"remaining={remaining}"
+                )
+                r.x = r.x - 2 if r.x == 0 else (
+                    r.x + 2 if r.x == self.X - 1 else r.x
+                )
+                r.y = r.y - 2 if r.y == 0 else (
+                    r.y + 2 if r.y == self.Y - 1 else r.y
+                )
+
             for r in self.robots:
-                bx, by = DEPOT_X, DEPOT_Y
-                if (r.x, r.y) == (bx, by):
+                if r.id in self.return_done:
                     continue
-                all_home = False
-                if r.id not in self.return_paths:
-                    p = bfs_path((r.x, r.y), (bx, by), hm)
-                    self.return_paths[r.id] = {
+
+                # Check boundary BEFORE stagger delay: a robot already sitting
+                # on an edge cell must exit immediately so it doesn't block
+                # others during its stagger window.
+                on_boundary = (
+                    r.x == 0 or r.x == self.X - 1 or
+                    r.y == 0 or r.y == self.Y - 1
+                )
+                if on_boundary:
+                    _mark_done(r)
+                    continue
+
+                # FIX 3: Respect stagger delay before starting to move.
+                if (t - self.return_start_tick) < self.return_delay.get(r.id, 0):
+                    continue
+
+                # Always route to nearest boundary cell via multi-goal BFS;
+                # replan immediately if path was cleared by a jiggle.
+                path_state = self.return_paths.get(r.id)
+                if path_state is None or path_state.get("path") is None:
+                    p = bfs_to_boundary((r.x, r.y), hm)
+                    goal_str = (
+                        f"({p[-1][0]},{p[-1][1]})" if p else "none"
+                    )
+                    is_replan = path_state is not None  # was cleared by jiggle
+                    verb = "replanned" if is_replan else "return path"
+                    steps = len(p) - 1 if p else 0
+                    self.get_logger().info(
+                        f"[t={t}] Robot {r.id} {verb} "
+                        f"({r.x},{r.y})->boundary via {goal_str} "
+                        f"({steps} steps)"
+                    )
+                    path_state = {
                         "path": p if p else [(r.x, r.y)],
                         "path_i": 0,
                     }
-                self.robot_step_along(r, hm, self.return_paths[r.id])
+                    self.return_paths[r.id] = path_state
+
+                self._try_move(r, hm, path_state, reservations, committed_moves, t)
+
+                # Jiggle clears the path — replan immediately with multi-goal
+                # BFS so the robot picks the nearest exit from its new position.
+                if path_state.get("path") is None:
+                    p = bfs_to_boundary((r.x, r.y), hm)
+                    goal_str = (
+                        f"({p[-1][0]},{p[-1][1]})" if p else "none"
+                    )
+                    steps = len(p) - 1 if p else 0
+                    self.get_logger().info(
+                        f"[t={t}] Robot {r.id} replanned "
+                        f"({r.x},{r.y})->boundary via {goal_str} "
+                        f"({steps} steps)"
+                    )
+                    path_state["path"] = p if p else [(r.x, r.y)]
+                    path_state["path_i"] = 0
+
+                # Check boundary again after the move.
+                if (r.x == 0 or r.x == self.X - 1 or
+                        r.y == 0 or r.y == self.Y - 1):
+                    _mark_done(r)
+
             self.publish_robots()
-            if all_home:
+            if all(r.id in self.return_done for r in self.robots):
                 self.get_logger().info(
                     "Construction complete. All robots returned to boundary."
                 )
@@ -680,14 +1103,88 @@ class MACCRvizSim(Node):
         # Normal simulation tick
         hm = heightmap(self.world)
         self.assign_tasks()
+        self.tick_count += 1
+        t = self.tick_count
 
+        # ------------------------------------------------------------------
+        # Reservation table: maps (x, y, z) -> robot_id for this timestep.
+        # Seeded with every robot's current position before any moves.
+        # Idle robots' z may have drifted (if blocks were placed under them);
+        # update them first so reservations are accurate.
+        # ------------------------------------------------------------------
         for r in self.robots:
             if r.id not in self.active:
                 r.z = surface_z(hm, r.x, r.y)
+
+        reservations = {}
+        for r in self.robots:
+            reservations[(r.x, r.y, r.z)] = r.id
+            if r.carrying:
+                reservations[(r.x, r.y, r.z + 1)] = r.id
+
+        # Track (from_xy, to_xy) for each robot that has committed a move
+        # this tick — used for swap-conflict detection.
+        committed_moves = {}
+
+        # ------------------------------------------------------------------
+        # Pre-pass: collect each active robot's intended next (x, y) from its
+        # current path, then detect head-on swap conflicts before any robot moves.
+        # Lower-priority robot (higher id) in each swap pair is added to
+        # forced_detour — it will sidestep this tick instead of following its path.
+        # ------------------------------------------------------------------
+        intended_next = {}   # robot_id → (nx, ny) or None
+        for _r in self.robots:
+            if _r.id not in self.active:
+                intended_next[_r.id] = None
+                continue
+            _st = self.active[_r.id]
+            _path = _st.get("path")
+            _pi = _st.get("path_i", 0)
+            intended_next[_r.id] = _path[_pi] if (_path and _pi < len(_path)) else None
+
+        forced_detour = set()   # robot IDs that must execute a detour this tick
+        for _i, _ra in enumerate(self.robots):
+            if _ra.id not in self.active or _ra.id in forced_detour:
+                continue
+            _ra_next = intended_next.get(_ra.id)
+            if _ra_next is None:
+                continue
+            for _rb in self.robots[_i + 1:]:
+                if _rb.id not in self.active or _rb.id in forced_detour:
+                    continue
+                # Swap: _ra wants _rb's cell AND _rb wants _ra's cell
+                if (_rb.x, _rb.y) == _ra_next and \
+                        intended_next.get(_rb.id) == (_ra.x, _ra.y):
+                    forced_detour.add(_rb.id)   # _ra has priority (lower id)
+                    self.get_logger().info(
+                        f"[t={t}] SWAP conflict: Robot {_ra.id} "
+                        f"({_ra.x},{_ra.y})→{_ra_next} ↔ "
+                        f"Robot {_rb.id} ({_rb.x},{_rb.y})"
+                        f"→({_ra.x},{_ra.y}). "
+                        f"Robot {_rb.id} forced to detour."
+                    )
+                    break
+
+        for r in self.robots:
+            if r.id not in self.active:
                 continue
 
             state = self.active[r.id]
             x, y, z, si = state["task"]
+
+            # Forced detour this tick (swap-conflict resolution)
+            if r.id in forced_detour:
+                result = self._execute_forced_detour(
+                    r, hm, state, reservations, committed_moves, t
+                )
+                if result == 'drop':
+                    if r.carrying:
+                        r.carrying = False
+                        r.carrying_si = -1
+                        reservations.pop((r.x, r.y, r.z + 1), None)
+                    self.task_queue.append(state["task"])
+                    del self.active[r.id]
+                continue
 
             if state["phase"] == "to_pickup":
                 px, py = state["pickup_cell"]
@@ -696,23 +1193,37 @@ class MACCRvizSim(Node):
                         p = bfs_path((r.x, r.y), (px, py), hm)
                         state["path"] = p if p is not None else [(r.x, r.y)]
                         state["path_i"] = 0
-                    done = self.robot_step_along(r, hm, state)
-                    if done:
+                    moved = self._try_move(
+                        r, hm, state, reservations, committed_moves, t
+                    )
+                    # If jiggle cleared the path, replan immediately from new position
+                    if not moved and state["path"] is None:
+                        ok = self._replan_after_detour(r, hm, state, t)
+                        if not ok:
+                            self.task_queue.append(state["task"])
+                            del self.active[r.id]
+                            continue
+                    if moved and state["path_i"] >= len(state["path"]):
                         state["phase"] = "pickup"
                         state["path"] = None
                 else:
                     state["phase"] = "pickup"
 
             elif state["phase"] == "pickup":
+                # Robot stays put — just mark it as carrying.
+                # Reserve the carried-block cell so other robots see it
+                # immediately within the same tick.
                 r.carrying = True
                 r.carrying_si = si
                 state["phase"] = "to_place"
+                reservations[(r.x, r.y, r.z + 1)] = r.id
 
             elif state["phase"] == "to_place":
                 if not self.can_place(x, y, z):
                     self.task_queue.append(state["task"])
                     r.carrying = False
                     r.carrying_si = -1
+                    reservations.pop((r.x, r.y, r.z + 1), None)
                     del self.active[r.id]
                     continue
 
@@ -726,6 +1237,7 @@ class MACCRvizSim(Node):
                     self.task_queue.append(state["task"])
                     r.carrying = False
                     r.carrying_si = -1
+                    reservations.pop((r.x, r.y, r.z + 1), None)
                     del self.active[r.id]
                     continue
 
@@ -735,17 +1247,33 @@ class MACCRvizSim(Node):
                         p = bfs_path((r.x, r.y), goal, hm)
                         state["path"] = p if p is not None else [(r.x, r.y)]
                         state["path_i"] = 0
-                    done = self.robot_step_along(r, hm, state)
-                    if done:
+                    moved = self._try_move(
+                        r, hm, state, reservations, committed_moves, t
+                    )
+                    # If jiggle cleared the path, replan immediately from new position
+                    if not moved and state["path"] is None:
+                        ok = self._replan_after_detour(r, hm, state, t)
+                        if not ok:
+                            r.carrying = False
+                            r.carrying_si = -1
+                            reservations.pop((r.x, r.y, r.z + 1), None)
+                            self.task_queue.append(state["task"])
+                            del self.active[r.id]
+                            continue
+                    if moved and state["path_i"] >= len(state["path"]):
                         state["phase"] = "place"
                         state["path"] = None
                 else:
                     state["phase"] = "place"
 
             elif state["phase"] == "place":
+                # Reserve the target voxel so no other robot steps on it or
+                # tries to place into it this same tick.
+                reservations[(x, y, z)] = r.id
                 if self.can_place(x, y, z):
                     self.world[z, y, x] = 1
                     self.world_sub[z, y, x] = si + 1   # store 1-indexed
+                reservations.pop((r.x, r.y, r.z + 1), None)
                 r.carrying = False
                 r.carrying_si = -1
                 del self.active[r.id]
@@ -830,7 +1358,7 @@ class MACCRvizSim(Node):
 
         for r in self.robots:
             rc, gc, bc = _ROBOT_COLOR
-            rz = float(r.z) * bs + bs * 0.5   # robot sits one half-block above surface
+            rz = float(r.z) * bs   # robot center flush with block at same z
 
             m = Marker()
             m.header.frame_id = "world"
