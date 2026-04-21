@@ -14,6 +14,9 @@ from macc_rviz.decomposition import decompose_structure, order_substructures
 from macc_rviz.parallel import find_parallel_groups
 from macc_rviz.planners import cbs_adapter
 
+# MILP adapter is imported lazily inside the MILP precompute path so the
+# node still boots when gurobipy is not installed (planner=milp just errors).
+
 # ---------------------------------------------------------------------------
 # Playback / timing constants — tune here; step_duration_sec ROS parameter
 # overrides STEP_DURATION_SEC at launch (seconds per action, no Hz divisor).
@@ -207,6 +210,11 @@ class MACCRvizSim(Node):
         self.declare_parameter("planner", "heuristic")
         self.declare_parameter("cbs_max_t", 400)
         self.declare_parameter("cbs_branch_limit", 50)
+        # MILP-specific parameters (only consumed when planner == "milp").
+        self.declare_parameter("milp_per_t_time_limit", 60.0)
+        self.declare_parameter("milp_total_time_limit", 600.0)
+        self.declare_parameter("milp_mip_gap", 0.0)
+        self.declare_parameter("milp_T_max", 40)
 
         num_robots = int(self.get_parameter("num_robots").value)
         self.step_duration_sec = float(self.get_parameter("step_duration_sec").value)
@@ -216,7 +224,13 @@ class MACCRvizSim(Node):
         self.planner = str(self.get_parameter("planner").value).lower()
         self.cbs_max_t = int(self.get_parameter("cbs_max_t").value)
         self.cbs_branch_limit = int(self.get_parameter("cbs_branch_limit").value)
-        if self.planner not in ("heuristic", "cbs"):
+        self.milp_per_t_time_limit = float(
+            self.get_parameter("milp_per_t_time_limit").value)
+        self.milp_total_time_limit = float(
+            self.get_parameter("milp_total_time_limit").value)
+        self.milp_mip_gap = float(self.get_parameter("milp_mip_gap").value)
+        self.milp_T_max = int(self.get_parameter("milp_T_max").value)
+        if self.planner not in ("heuristic", "cbs", "milp"):
             self.get_logger().warning(
                 f"Unknown planner '{self.planner}', falling back to 'heuristic'"
             )
@@ -530,9 +544,11 @@ class MACCRvizSim(Node):
 
         self.stage = _STAGE_BUILD
 
-        # CBS mode: precompute joint plans before any robot moves.
+        # Precompute precomputed-plan modes before any robot moves.
         if self.planner == "cbs":
             self._precompute_cbs_plans()
+        elif self.planner == "milp":
+            self._precompute_milp_plans()
 
     # ------------------------------------------------------------------
     # CBS precompute
@@ -607,6 +623,88 @@ class MACCRvizSim(Node):
         )
 
         # Replay state
+        self.cbs_groups = groups_meta
+        self.cbs_group_idx = 0
+        self.cbs_step_idx = [0] * num_robots
+        self.cbs_return_plans = return_plans
+        self.cbs_return_step_idx = [0] * num_robots
+
+    # ------------------------------------------------------------------
+    # MILP precompute
+    # ------------------------------------------------------------------
+
+    def _precompute_milp_plans(self):
+        """Precompute MILP plans for each parallel group.
+
+        Each group is fused into a single MILP (target = union of member
+        sub heights) and solved jointly.  The resulting per-trip Step
+        output is translated by ``milp_adapter`` into per-robot plans
+        compatible with the CBS replay loop (which is why MILP reuses
+        ``_tick_cbs`` / ``_apply_cbs_step``).
+        """
+        from macc_rviz.planners import milp_adapter  # lazy import (gurobipy)
+
+        num_robots = len(self.robots)
+        world_sim = np.zeros_like(self.target, dtype=int)
+        robot_starts = [(r.x, r.y) for r in self.robots]
+
+        groups_meta = []
+        for gi, group in enumerate(self.groups):
+            subs = [self.substructures[si] for si in group]
+            result = milp_adapter.plan_group(
+                substructures=subs,
+                substructure_indices=list(group),
+                world_init=world_sim,
+                robot_starts=robot_starts,
+                num_robots=num_robots,
+                X=self.X,
+                Y=self.Y,
+                t_start=0,
+                per_t_time_limit=self.milp_per_t_time_limit,
+                total_time_limit=self.milp_total_time_limit,
+                mip_gap=self.milp_mip_gap,
+                T_max=self.milp_T_max,
+                logger=lambda msg: self.get_logger().info(msg),
+            )
+            groups_meta.append(result)
+
+            md = result['metadata']
+            self.get_logger().info(
+                f"[MILP] group {gi} substructures={md['substructure_indices']} "
+                f"blocks={md['block_count']} agents={md['num_agents_used']} "
+                f"T_min={md['T_min']} T_final={md['T_final']} "
+                f"solve={md['solve_time']:.3f}s "
+                f"fallback={md['used_fallback']}"
+            )
+
+            # Advance world_sim so the next group plans against the updated hm.
+            for si in group:
+                mask = self.substructures[si] == 1
+                world_sim[mask] = 1
+
+            # Advance robot starts to their final (x, y) in this group's plan.
+            new_starts = []
+            for i, plan in enumerate(result['plans']):
+                if plan:
+                    new_starts.append((plan[-1].x, plan[-1].y))
+                else:
+                    new_starts.append(robot_starts[i])
+            robot_starts = new_starts
+
+        # Return phase — CBS-based boundary return (planner-agnostic).
+        return_plans = milp_adapter.plan_return(
+            robot_starts=robot_starts,
+            X=self.X, Y=self.Y,
+            world_state=world_sim,
+            t_start=0,
+            max_t=max(200, self.cbs_max_t // 2),
+        )
+        self.get_logger().info(
+            f"[MILP] return-phase plan: "
+            f"{sum(1 for p in return_plans if p)} agents moving"
+        )
+
+        # Reuse the CBS replay state machine — plans/events have the same shape.
         self.cbs_groups = groups_meta
         self.cbs_group_idx = 0
         self.cbs_step_idx = [0] * num_robots
@@ -985,29 +1083,26 @@ class MACCRvizSim(Node):
     def _apply_cbs_step(self, r, step, events, t):
         """Apply a single Step to robot r, updating world/world_sub as needed.
 
-        ``events`` is the per-robot event dict returned by cbs_adapter
-        (keyed by absolute t). ``t`` is the step's absolute t within the
-        current group.
+        ``events`` is the per-robot event dict (keyed by absolute t).
+        Events are dispatched by their type string rather than the
+        Step's action, so synthetic events (e.g. MILP's entry-carrying
+        pickup attached to a WAIT step) are honoured.
         """
-        from macc_rviz.cbs_planner import (
-            ACTION_MOVE, ACTION_WAIT, ACTION_PICKUP, ACTION_PLACE,
-        )
         r.x, r.y, r.z = step.x, step.y, step.z
-        if step.action == ACTION_PICKUP:
-            ev = events.get(t)
-            if ev is not None and ev[0] == 'pickup':
-                r.carrying = True
-                r.carrying_si = ev[1]
-        elif step.action == ACTION_PLACE:
-            ev = events.get(t)
-            if ev is not None and ev[0] == 'place':
-                _, bx, by, bz, si = ev
-                if self.world[bz, by, bx] == 0:
-                    self.world[bz, by, bx] = 1
-                    self.world_sub[bz, by, bx] = si + 1
+        ev = events.get(t)
+        if ev is None:
+            return
+        kind = ev[0]
+        if kind == 'pickup':
+            r.carrying = True
+            r.carrying_si = ev[1]
+        elif kind == 'place':
+            _, bx, by, bz, si = ev
+            if self.world[bz, by, bx] == 0:
+                self.world[bz, by, bx] = 1
+                self.world_sub[bz, by, bx] = si + 1
             r.carrying = False
             r.carrying_si = -1
-        # MOVE / WAIT: position already updated; nothing else to do.
 
     def _tick_cbs(self):
         """Stage 4 + Stage 5 replay of precomputed CBS plans."""
@@ -1175,8 +1270,8 @@ class MACCRvizSim(Node):
         # Stage 4: construction
         # ----------------------------------------------------------------
 
-        # CBS planner: dispatch to precomputed-plan replay.
-        if self.planner == "cbs":
+        # Precomputed-plan planners (CBS / MILP) share the same replay loop.
+        if self.planner in ("cbs", "milp"):
             self._tick_cbs()
             return
 
