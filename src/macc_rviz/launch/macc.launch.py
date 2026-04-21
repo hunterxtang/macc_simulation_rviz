@@ -50,6 +50,11 @@ def generate_launch_description():
         default_value="-1",
         description="-1 → fresh random each run; non-negative fixes layout.",
     )
+    use_example_structure_arg = DeclareLaunchArgument(
+        "use_example_structure",
+        default_value="false",
+        description="Use the hand-built 13-block example structure instead of a random one.",
+    )
 
     return LaunchDescription([
         planner_arg,
@@ -61,6 +66,7 @@ def generate_launch_description():
         milp_T_max_arg,
         num_robots_arg,
         seed_arg,
+        use_example_structure_arg,
         Node(
             package="macc_rviz",
             executable="macc_rviz_sim",
@@ -68,7 +74,7 @@ def generate_launch_description():
             parameters=[
                 {"num_robots": LaunchConfiguration("num_robots")},
                 {"step_duration_sec": 0.4},
-                {"use_example_structure": False},
+                {"use_example_structure": LaunchConfiguration("use_example_structure")},
                 {"seed": LaunchConfiguration("seed")},
                 {"planner": LaunchConfiguration("planner")},
                 {"cbs_max_t": LaunchConfiguration("cbs_max_t")},
