@@ -267,8 +267,10 @@ def _build_robot_plan(robot_start, blocks, hm, depot, t_start,
     -------
     (steps, events) or None.
       steps  – list[Step] covering all phases.
-      events – dict {t: ('pickup', si)} or {t: ('place', bx, by, bz, si)}
-               for the semantic actions embedded in the plan.
+      events – dict {t: ('pickup', bx, by, bz, si)} or
+               {t: ('place', bx, by, bz, si)} for the semantic actions
+               embedded in the plan.  CBS depot pickups use the off-grid
+               sentinel (-1, -1, -1) for the source voxel.
     """
     steps = []
     events = {}
@@ -285,11 +287,13 @@ def _build_robot_plan(robot_start, blocks, hm, depot, t_start,
             t = nav[-1].t if nav else t
         cur = depot
 
-        # 2. Pickup (one tick at depot)
+        # 2. Pickup (one tick at depot).  CBS depot pickups draw from the
+        # off-grid block supply, so emit the (-1,-1,-1) sentinel to tell
+        # the replay there is no source voxel to clear.
         t += 1
         dz = int(hm[depot[1], depot[0]])
         steps.append(Step(ACTION_PICKUP, depot[0], depot[1], dz, t))
-        events[t] = ('pickup', si)
+        events[t] = ('pickup', -1, -1, -1, si)
 
         # 3. Navigate to placement cell
         pcell = _placement_cell(bx, by, bz, cur, hm)
@@ -431,8 +435,8 @@ def cbs_plan(robot_starts, block_assignments, hm, depot=None,
     (plans, events_per_robot, conflicts_resolved) or None.
       plans             – list[list[Step]], one per robot.
       events_per_robot  – list[dict], one per robot;
-                          each dict maps t → ('pickup', si) or
-                          ('place', bx, by, bz, si).
+                          each dict maps t → ('pickup', bx, by, bz, si)
+                          or ('place', bx, by, bz, si).
       conflicts_resolved – int, how many conflicts CBS resolved.
     Returns None when no conflict-free plan is found within branch_limit,
     signalling the caller to use serial execution as fallback.

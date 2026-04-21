@@ -277,6 +277,16 @@ def plan_group(
                         shifted_evs[tev + t_offset] = (
                             'place', bx - 1, by - 1, bz, esi,
                         )
+                    elif ev[0] == 'pickup' and len(ev) == 5:
+                        _, bx, by, bz, esi = ev
+                        # Off-grid sentinel (-1,-1,-1) passes through unshifted;
+                        # grid pickups shift back from padded to unpadded coords.
+                        if bx >= 0:
+                            shifted_evs[tev + t_offset] = (
+                                'pickup', bx - 1, by - 1, bz, esi,
+                            )
+                        else:
+                            shifted_evs[tev + t_offset] = ev
                     else:
                         shifted_evs[tev + t_offset] = ev
                 sub_trips.append(shifted_trip)

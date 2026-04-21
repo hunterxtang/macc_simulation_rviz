@@ -1103,8 +1103,20 @@ class MACCRvizSim(Node):
             return
         kind = ev[0]
         if kind == 'pickup':
+            # Modern format: ('pickup', bx, by, bz, si). Legacy 2-tuple
+            # ('pickup', si) is accepted as off-grid pickup (no world clear).
+            if len(ev) == 5:
+                _, bx, by, bz, si = ev
+            else:
+                _, si = ev
+                bx = by = bz = -1
             r.carrying = True
-            r.carrying_si = ev[1]
+            r.carrying_si = si
+            # Off-grid pickups (CBS depot, MILP entry-carrying) use bx<0.
+            # Grid pickups (MILP R_5 scaffold tear-down) clear the source cell.
+            if bx >= 0 and self.world[bz, by, bx] == 1:
+                self.world[bz, by, bx] = 0
+                self.world_sub[bz, by, bx] = 0
         elif kind == 'place':
             _, bx, by, bz, si = ev
             if self.world[bz, by, bx] == 0:

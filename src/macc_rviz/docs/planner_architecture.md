@@ -76,7 +76,7 @@ substructure:
 **Output** — fits the existing `Step` namedtuple at `cbs_planner.py:42`:
 ```
 plan: dict[int, list[Step]]          # robot_id → per-tick Steps
-events_per_robot: dict[int, dict]    # robot_id → {t: ('pickup', si) | ('place', bx, by, bz, si)}
+events_per_robot: dict[int, dict]    # robot_id → {t: ('pickup', bx, by, bz, si) | ('place', bx, by, bz, si)}
 metadata: {
     "makespan": int,
     "sum_of_costs": int,
@@ -89,7 +89,12 @@ metadata: {
 
 The plan-replay loop (new) consumes `plan` + `events_per_robot` and:
 - applies per-tick positions to `Robot.x/y/z`;
-- on a `('pickup', si)` event sets `carrying=True, carrying_si=si`;
+- on a `('pickup', bx, by, bz, si)` event sets `carrying=True,
+  carrying_si=si`; if `bx >= 0` (a real grid pickup, e.g. MILP R_5
+  scaffold tear-down), also clears `world[bz,by,bx]=0` and
+  `world_sub[bz,by,bx]=0`.  The off-grid sentinel `(-1,-1,-1)` is
+  used by CBS depot pickups and MILP entry-carrying so the replay
+  knows there is no source voxel to clear;
 - on a `('place', bx, by, bz, si)` event mutates `world[bz, by, bx] = 1`
   and `world_sub[bz, by, bx] = si + 1`, clears carrying.
 

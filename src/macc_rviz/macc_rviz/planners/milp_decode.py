@@ -53,14 +53,21 @@ def extract_agent_trips_with_events(R_vars, T, target_sub=None, tol=1e-5):
     Per-trip events mirror the CBS event schema so a single replay
     path in ``macc_rviz_sim`` can consume either planner's output:
 
-        ('pickup', si)          — robot now carries a block tagged si
+        ('pickup', bx, by, bz, si)
+                                — robot now carries a block tagged si.
+                                  (bx, by, bz) is the source voxel for
+                                  R_5 grid pickups (replay clears it);
+                                  (-1, -1, -1) for off-grid carries
+                                  (entry-carrying / depot supply).
         ('place', bx, by, bz, si)
                                 — block placed at voxel (bx, by, bz);
                                   world/world_sub are updated here
 
     Synthetic pickups are emitted at the first Step of trips that
-    enter with c=1 (agent walked on carrying).  The ``si`` tag looks
-    ahead to the trip's first R_6 delivery; if none, si=-1 (scaffold).
+    enter with c=1 (agent walked on carrying); these use the off-grid
+    sentinel since no grid voxel sourced the block.  The ``si`` tag
+    looks ahead to the trip's first R_6 delivery; if none, si=-1
+    (scaffold).
 
     Parameters
     ----------
@@ -166,7 +173,7 @@ def _walk_trip(entry, by_time, used, T, target_sub, tol=1e-5):
             x, y, z = sx, sy, sz
             c = 1
             si_pick = _si_at(target_sub, dx_, dy_, dz_)
-            evs[t + 1] = ('pickup', si_pick)
+            evs[t + 1] = ('pickup', dx_, dy_, dz_, si_pick)
             steps.append(Step(act, x, y, z, t + 1))
         elif a == D:
             # R_6: robot at (sx,sy,sz) delivers a block to pillar
@@ -184,9 +191,11 @@ def _walk_trip(entry, by_time, used, T, target_sub, tol=1e-5):
 
         t += 1
 
-    # Finalize the synthetic entry pickup's si tag.
+    # Finalize the synthetic entry pickup's si tag.  Source coords are
+    # the off-grid sentinel because the block came in from outside the
+    # grid (R_1 carrying-entry), not from any voxel pillar.
     if c_e == 1:
         si_entry = deferred_entry_si if deferred_entry_si is not None else -1
-        evs[t_e + 1] = ('pickup', si_entry)
+        evs[t_e + 1] = ('pickup', -1, -1, -1, si_entry)
 
     return steps, evs
