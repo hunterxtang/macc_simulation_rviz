@@ -1,0 +1,55 @@
+==== case1_tiny  shape=(3, 5, 5)  blocks=5 ====
+  [hybrid] case1_tiny: 2 subs, 1 groups
+Set parameter Username
+Set parameter LicenseID to value 2811112
+Academic license - for non-commercial use only - expires 2027-04-21
+    [MILP] sub 0: planner=milp T=14 trips=8 vars=38666 cons=11730 solve=3.97s obj=30.0 blocks=3
+    [MILP] sub 1: planner=milp T=8 trips=3 vars=18110 cons=6036 solve=0.44s obj=12.0 blocks=2
+  [cbs ]   case1_tiny: 2 subs, 1 groups
+    => hybrid T=20 solve=4.41s mix={'milp': 2, 'cbs_fallback': 0}   cbs T=35 solve=0.01s
+==== case2_small  shape=(3, 5, 5)  blocks=13 ====
+  [hybrid] case2_small: 5 subs, 1 groups
+    [MILP] sub 0: planner=milp T=9 trips=4 vars=15980 cons=5526 solve=0.58s obj=19.0 blocks=4
+    [MILP] sub 1: planner=milp T=8 trips=3 vars=13431 cons=4775 solve=0.35s obj=14.0 blocks=3
+    [MILP] sub 2: planner=milp T=8 trips=3 vars=13431 cons=4775 solve=0.36s obj=14.0 blocks=3
+    [MILP] sub 3: planner=milp T=8 trips=2 vars=13431 cons=4775 solve=0.34s obj=10.0 blocks=2
+    [MILP] sub 4: planner=milp T=11 trips=2 vars=21078 cons=7028 solve=0.92s obj=11.0 blocks=1
+  [cbs ]   case2_small: 5 subs, 1 groups
+    => hybrid T=42 solve=2.55s mix={'milp': 5, 'cbs_fallback': 0}   cbs T=93 solve=0.03s
+==== case3_medium_low  shape=(3, 6, 6)  blocks=20 ====
+  [hybrid] case3_medium_low: 6 subs, 1 groups
+    [MILP] sub 0: planner=milp T=16 trips=9 vars=63992 cons=18423 solve=60.75s obj=44.0 blocks=8
+    [MILP] sub 1: planner=milp T=16 trips=9 vars=63992 cons=18423 solve=52.55s obj=44.0 blocks=8
+    [MILP] sub 2: planner=milp T=6 trips=1 vars=15752 cons=5573 solve=0.24s obj=4.0 blocks=1
+    [MILP] sub 3: planner=milp T=10 trips=2 vars=35048 cons=10713 solve=1.18s obj=12.0 blocks=1
+    [MILP] sub 4: planner=milp T=10 trips=2 vars=35048 cons=10713 solve=1.18s obj=12.0 blocks=1
+    [MILP] sub 5: planner=milp T=6 trips=1 vars=15752 cons=5573 solve=0.22s obj=4.0 blocks=1
+  [cbs ]   case3_medium_low: 6 subs, 1 groups
+    => hybrid T=62 solve=116.12s mix={'milp': 6, 'cbs_fallback': 0}   cbs T=181 solve=0.06s
+==== case4_medium_high  shape=(3, 5, 5)  blocks=27 ====
+  [hybrid] case4_medium_high: 2 subs, 1 groups
+    [MILP] sub 0: planner=milp T=44 trips=29 vars=141446 cons=40200 solve=1071.19s obj=124.0 blocks=18
+    [MILP] sub 1: MILP infeasible at all T <= T_max after 374.93s, falling back to CBS (blocks=9, T_max=150, per_t_limit=1.0s)
+    [MILP] sub 1: planner=cbs_fallback T_contribution=58 cbs_solve=0.03s cbs_serial_fallback=True blocks=9
+  [cbs ]   case4_medium_high: 2 subs, 1 groups
+    => hybrid T=102 solve=1446.17s mix={'milp': 1, 'cbs_fallback': 1}   cbs T=204 solve=0.06s
+==== case5_large_flat  shape=(2, 8, 8)  blocks=40 ====
+  [hybrid] case5_large_flat: 18 subs, 1 groups
+    [MILP] sub 0: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.35s obj=19.0 blocks=4
+    [MILP] sub 1: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.33s obj=19.0 blocks=4
+    [MILP] sub 2: planner=milp T=18 trips=8 vars=92420 cons=27021 solve=86.90s obj=59.0 blocks=8
+    [MILP] sub 3: planner=milp T=11 trips=4 vars=49944 cons=15422 solve=2.02s obj=30.0 blocks=4
+    [MILP] sub 4: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.25s obj=19.0 blocks=4
+    [MILP] sub 5: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.26s obj=19.0 blocks=4
+    [MILP] sub 6: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.28s obj=4.0 blocks=1
+    [MILP] sub 7: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.30s obj=4.0 blocks=1
+    [MILP] sub 8: planner=milp T=10 trips=1 vars=43876 cons=13765 solve=1.46s obj=8.0 blocks=1
+    [MILP] sub 9: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.28s obj=4.0 blocks=1
+    [MILP] sub 10: planner=milp T=8 trips=1 vars=31740 cons=10451 solve=0.73s obj=6.0 blocks=1
+    [MILP] sub 11: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.28s obj=4.0 blocks=1
+    [MILP] sub 12: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.30s obj=4.0 blocks=1
+    [MILP] sub 13: planner=milp T=10 trips=1 vars=43876 cons=13765 solve=1.45s obj=8.0 blocks=1
+    [MILP] sub 14: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.29s obj=4.0 blocks=1
+    [MILP] sub 15: planner=milp T=8 trips=1 vars=31740 cons=10451 solve=0.74s obj=6.0 blocks=1
+    [MILP] sub 16: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.30s obj=4.0 blocks=1
+    [MILP] sub 17: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.28s obj=4.0 blocks=1

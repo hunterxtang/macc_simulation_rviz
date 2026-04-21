@@ -1,0 +1,23 @@
+==== case5_large_flat  shape=(2, 8, 8)  blocks=40 ====
+  [hybrid] case5_large_flat: 18 subs, 1 groups
+Set parameter Username
+Set parameter LicenseID to value 2811112
+Academic license - for non-commercial use only - expires 2027-04-21
+    [MILP] sub 0: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.31s obj=19.0 blocks=4
+    [MILP] sub 1: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.32s obj=19.0 blocks=4
+    [MILP] sub 2: planner=milp T=18 trips=8 vars=92420 cons=27021 solve=88.12s obj=59.0 blocks=8
+    [MILP] sub 3: planner=milp T=11 trips=4 vars=49944 cons=15422 solve=2.23s obj=30.0 blocks=4
+    [MILP] sub 4: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.35s obj=19.0 blocks=4
+    [MILP] sub 5: planner=milp T=9 trips=4 vars=37808 cons=12108 solve=1.31s obj=19.0 blocks=4
+    [MILP] sub 6: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.31s obj=4.0 blocks=1
+    [MILP] sub 7: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.32s obj=4.0 blocks=1
+    [MILP] sub 8: planner=milp T=10 trips=1 vars=43876 cons=13765 solve=1.59s obj=8.0 blocks=1
+    [MILP] sub 9: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.29s obj=4.0 blocks=1
+    [MILP] sub 10: planner=milp T=8 trips=1 vars=31740 cons=10451 solve=0.81s obj=6.0 blocks=1
+    [MILP] sub 11: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.28s obj=4.0 blocks=1
+    [MILP] sub 12: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.32s obj=4.0 blocks=1
+    [MILP] sub 13: planner=milp T=10 trips=1 vars=43876 cons=13765 solve=1.44s obj=8.0 blocks=1
+    [MILP] sub 14: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.26s obj=4.0 blocks=1
+    [MILP] sub 15: planner=milp T=8 trips=1 vars=31740 cons=10451 solve=0.78s obj=6.0 blocks=1
+    [MILP] sub 16: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.32s obj=4.0 blocks=1
+    [MILP] sub 17: planner=milp T=6 trips=1 vars=19604 cons=7137 solve=0.29s obj=4.0 blocks=1
