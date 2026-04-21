@@ -51,6 +51,15 @@ Simulates **Multi-Agent Collective Construction (MACC)**: robots build a 3D voxe
 
 4. **Execution** — two independent modes (see below).
 
+### `cbs_planner.py` — Space-time A* and CBS-lite (not yet integrated)
+
+Fully implemented (570 lines) but not imported by either execution path. Contains:
+- `space_time_astar` — plans a single robot's path in (x, y, t) space-time, respecting vertex and edge constraints.
+- `cbs_plan` — joint CBS-lite solver: plans all robots' full trajectories (depot → pickup → placement per block), detects vertex/swap conflicts, branches by adding forbidden-state constraints, and replans until conflict-free or branch limit is hit.
+- Constraint format: vertex `(x, y, t)` or edge `(x1, y1, x2, y2, t)` tuples in a `frozenset`.
+
+Currently, both execution modes use simple BFS navigation without inter-robot conflict resolution. Integrating `cbs_planner` would replace that BFS with conflict-free multi-agent paths.
+
 ### RViz mode (`macc_rviz_sim.py`)
 
 `MACCRvizSim` is a ROS2 node with a discrete-time simulation driven by a timer at `STEP_DURATION_SEC` (currently `0.4` s/tick). It runs a 5-stage intro sequence before construction:
@@ -59,9 +68,9 @@ Simulates **Multi-Agent Collective Construction (MACC)**: robots build a 3D voxe
 - **Stage 2** — progressive decomposition reveal (one substructure per `SUBSTRUCTURE_REVEAL_SEC`)
 - **Stage 3** — build-order labels added
 - **Stage 4** — actual construction (robots move, pick up, place)
-- **Stage 5** — robots return to depot after build completes
+- **Stage 5** — robots return to nearest boundary cell (`bfs_to_boundary`) after build completes
 
-Robot navigation uses BFS on a heightmap (`heightmap()` sums `world` along Z). Robots can climb ±1 block per step. All robots share a single fixed depot at `(DEPOT_X, DEPOT_Y) = (0, 0)` for block pickups and post-build return.
+Robot navigation uses BFS on a heightmap (`heightmap()` sums `world` along Z). Robots can climb ±1 block per step. All robots share a single fixed depot at `(DEPOT_X, DEPOT_Y) = (0, 0)` for block pickups during Stage 4.
 
 RViz topics (all `MarkerArray`):
 - `/macc/blocks` — placed blocks colored by substructure (tab10 palette)
@@ -76,7 +85,7 @@ ROS parameters (set in `macc.launch.py` or via `--ros-args`):
 |---|---|---|
 | `num_robots` | 4 | |
 | `step_duration_sec` | 0.4 | overrides `STEP_DURATION_SEC` constant |
-| `block_scale` | 1.0 | marker cube side length in metres |
+| `block_scale` | 1.0 | marker cube side length in metres (declared in node, not in launch file) |
 | `use_example_structure` | false | hardcoded 5×5×3 structure |
 | `seed` | -1 | `-1` = fresh random each run; any non-negative value fixes the layout |
 
