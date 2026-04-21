@@ -669,11 +669,20 @@ class MACCRvizSim(Node):
             groups_meta.append(result)
 
             md = result['metadata']
+            sub_meta_list = md.get('substructure_metadata', [])
+            n_milp = sum(
+                1 for m in sub_meta_list if m['planner_used'] == 'milp'
+            )
+            n_cbs = sum(
+                1 for m in sub_meta_list
+                if m['planner_used'] == 'cbs_fallback'
+            )
             self.get_logger().info(
                 f"[MILP] group {gi} substructures={md['substructure_indices']} "
                 f"blocks={md['block_count']} agents={md['num_agents_used']} "
                 f"T_min={md['T_min']} T_final={md['T_final']} "
                 f"solve={md['solve_time']:.3f}s "
+                f"planner_mix=milp:{n_milp}/cbs_fallback:{n_cbs} "
                 f"fallback={md['used_fallback']}"
             )
 
