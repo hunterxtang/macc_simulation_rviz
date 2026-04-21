@@ -356,24 +356,33 @@ def _detect_first_conflict(robot_starts, plans):
 
 
 def _serial_fallback(robot_starts, block_assignments, hm, depot, t_start,
-                     max_t):
+                     max_t, depots=None):
     """Plan robots one at a time (guaranteed conflict-free).
 
     Robot 0 plans from t_start; each subsequent robot starts immediately
     after the previous one finishes, so no two robots are active at once.
     Returns (plans, events_per_robot).
+
+    Accepts per-robot ``depots`` (list of (x, y)) mirroring ``cbs_plan``.
+    Falls back to the single shared ``depot`` when ``depots`` is None.
     """
+    n = len(robot_starts)
+    if depots is None:
+        if depot is None:
+            raise ValueError('_serial_fallback: provide either depot or depots')
+        depots = [depot] * n
+
     plans = []
     events_per_robot = []
     t = t_start
 
-    for start, blocks in zip(robot_starts, block_assignments):
+    for i, (start, blocks) in enumerate(zip(robot_starts, block_assignments)):
         if not blocks:
             plans.append([])
             events_per_robot.append({})
             continue
         result = _build_robot_plan(
-            start, blocks, hm, depot, t, frozenset(), max_t,
+            start, blocks, hm, depots[i], t, frozenset(), max_t,
         )
         if result is None:
             # Unreachable goal — treat as empty plan
@@ -393,8 +402,8 @@ def _serial_fallback(robot_starts, block_assignments, hm, depot, t_start,
 # Phase 3: cbs_plan — joint CBS-lite planner
 # ---------------------------------------------------------------------------
 
-def cbs_plan(robot_starts, block_assignments, hm, depot,
-             t_start=0, max_t=400, branch_limit=50):
+def cbs_plan(robot_starts, block_assignments, hm, depot=None,
+             t_start=0, max_t=400, branch_limit=50, depots=None):
     """Joint CBS-lite planner for N robots.
 
     Plans all robots' full block-delivery trajectories jointly, resolving
@@ -406,10 +415,16 @@ def cbs_plan(robot_starts, block_assignments, hm, depot,
     robot_starts      : list of (x, y)  — one per robot.
     block_assignments : list of list of (bx, by, bz, si)  — one per robot.
     hm                : numpy.ndarray (Y, X), treated as static.
-    depot             : (int, int)  — block pickup location.
+    depot             : (int, int) or None
+        Single shared pickup cell. Used when ``depots`` is None.
     t_start           : int  — absolute timestep of robot starts.
     max_t             : int  — hard A* time horizon.
     branch_limit      : int  — max constraint additions before giving up.
+    depots            : list of (int, int) or None
+        Per-robot pickup cells (one per robot). When provided, overrides
+        ``depot`` for each robot individually. Required when robots should
+        use different boundary cells for pickup (paper's "any boundary
+        cell" semantics — MACC §III).
 
     Returns
     -------
@@ -423,6 +438,14 @@ def cbs_plan(robot_starts, block_assignments, hm, depot,
     signalling the caller to use serial execution as fallback.
     """
     n = len(robot_starts)
+    if depots is None:
+        if depot is None:
+            raise ValueError('cbs_plan: provide either depot or depots')
+        depots = [depot] * n
+    elif len(depots) != n:
+        raise ValueError(
+            f'cbs_plan: len(depots)={len(depots)} != n_robots={n}'
+        )
     constraints = [frozenset() for _ in range(n)]
 
     # --- initial independent plans ----------------------------------------
@@ -434,7 +457,7 @@ def cbs_plan(robot_starts, block_assignments, hm, depot,
             events_per_robot.append({})
             continue
         result = _build_robot_plan(
-            robot_starts[i], block_assignments[i], hm, depot,
+            robot_starts[i], block_assignments[i], hm, depots[i],
             t_start, constraints[i], max_t,
         )
         if result is None:
@@ -457,7 +480,7 @@ def cbs_plan(robot_starts, block_assignments, hm, depot,
         # Try constraining the higher-index robot (rj) first
         new_cj = constraints[rj] | {cj_tuple}
         result_j = _build_robot_plan(
-            robot_starts[rj], block_assignments[rj], hm, depot,
+            robot_starts[rj], block_assignments[rj], hm, depots[rj],
             t_start, new_cj, max_t,
         )
         branches += 1
@@ -477,7 +500,7 @@ def cbs_plan(robot_starts, block_assignments, hm, depot,
 
         new_ci = constraints[ri] | {ci_tuple}
         result_i = _build_robot_plan(
-            robot_starts[ri], block_assignments[ri], hm, depot,
+            robot_starts[ri], block_assignments[ri], hm, depots[ri],
             t_start, new_ci, max_t,
         )
         branches += 1

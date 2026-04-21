@@ -12,6 +12,7 @@ from builtin_interfaces.msg import Duration as BuiltinDuration
 from macc_rviz.structure_utils import create_random_structure, create_example_structure
 from macc_rviz.decomposition import decompose_structure, order_substructures
 from macc_rviz.parallel import find_parallel_groups
+from macc_rviz.planners import cbs_adapter
 
 # ---------------------------------------------------------------------------
 # Playback / timing constants — tune here; step_duration_sec ROS parameter
@@ -201,12 +202,25 @@ class MACCRvizSim(Node):
         # seed=-1 means "pick a fresh random seed each run"; any non-negative
         # value is used as-is for reproducibility.
         self.declare_parameter("seed", -1)
+        # planner: "heuristic" (reactive per-tick FSM, default) or "cbs"
+        # (precomputed conflict-free joint plan via cbs_planner).
+        self.declare_parameter("planner", "heuristic")
+        self.declare_parameter("cbs_max_t", 400)
+        self.declare_parameter("cbs_branch_limit", 50)
 
         num_robots = int(self.get_parameter("num_robots").value)
         self.step_duration_sec = float(self.get_parameter("step_duration_sec").value)
         self.block_scale = float(self.get_parameter("block_scale").value)
         use_example = bool(self.get_parameter("use_example_structure").value)
         seed_param = int(self.get_parameter("seed").value)
+        self.planner = str(self.get_parameter("planner").value).lower()
+        self.cbs_max_t = int(self.get_parameter("cbs_max_t").value)
+        self.cbs_branch_limit = int(self.get_parameter("cbs_branch_limit").value)
+        if self.planner not in ("heuristic", "cbs"):
+            self.get_logger().warning(
+                f"Unknown planner '{self.planner}', falling back to 'heuristic'"
+            )
+            self.planner = "heuristic"
 
         # Resolve seed: -1 → fresh seed from nanosecond wall-clock.
         if seed_param < 0:
@@ -515,6 +529,89 @@ class MACCRvizSim(Node):
         self._publish_subtext()
 
         self.stage = _STAGE_BUILD
+
+        # CBS mode: precompute joint plans before any robot moves.
+        if self.planner == "cbs":
+            self._precompute_cbs_plans()
+
+    # ------------------------------------------------------------------
+    # CBS precompute
+    # ------------------------------------------------------------------
+
+    def _precompute_cbs_plans(self):
+        """Precompute conflict-free joint plans, one per parallel group.
+
+        Invariant (D-1): a fresh heightmap must be derived from the current
+        world state before each group is handed to CBS. ``cbs_adapter``
+        asserts this via ``assert_hm_matches_world``; a stale hm would
+        silently plan against the wrong free/occupied cells.
+        """
+        num_robots = len(self.robots)
+        # Simulated world that advances group-by-group so each group's
+        # heightmap reflects all prior placements.
+        world_sim = np.zeros_like(self.target, dtype=int)
+        robot_starts = [(r.x, r.y) for r in self.robots]
+
+        groups_meta = []
+        for gi, group in enumerate(self.groups):
+            subs = [self.substructures[si] for si in group]
+            result = cbs_adapter.plan_group(
+                substructures=subs,
+                substructure_indices=list(group),
+                world_init=world_sim,
+                robot_starts=robot_starts,
+                num_robots=num_robots,
+                X=self.X,
+                Y=self.Y,
+                t_start=0,
+                max_t=self.cbs_max_t,
+                branch_limit=self.cbs_branch_limit,
+            )
+            groups_meta.append(result)
+
+            md = result['metadata']
+            self.get_logger().info(
+                f"[CBS] group {gi} substructures={md['substructure_indices']} "
+                f"blocks={md['block_count']} agents={md['num_agents_used']} "
+                f"T_min={md['T_min']} T_final={md['T_final']} "
+                f"solve={md['solve_time']:.3f}s "
+                f"conflicts_resolved={md['conflicts_resolved']} "
+                f"fallback={md['used_fallback']}"
+            )
+
+            # Advance world_sim so the next group plans against fresh hm.
+            for si in group:
+                mask = self.substructures[si] == 1
+                world_sim[mask] = 1
+
+            # Advance robot starts to each robot's final (x, y) in this group.
+            new_starts = []
+            for i, plan in enumerate(result['plans']):
+                if plan:
+                    new_starts.append((plan[-1].x, plan[-1].y))
+                else:
+                    new_starts.append(robot_starts[i])
+            robot_starts = new_starts
+
+        # Return phase — one joint plan from final positions to boundary.
+        return_plans = cbs_adapter.plan_return(
+            robot_starts=robot_starts,
+            X=self.X, Y=self.Y,
+            world_state=world_sim,
+            t_start=0,
+            max_t=max(200, self.cbs_max_t // 2),
+        )
+        self.get_logger().info(
+            f"[CBS] return-phase plan: "
+            f"{sum(1 for p in return_plans if p)} agents moving"
+        )
+
+        # Replay state
+        self.cbs_groups = groups_meta
+        self.cbs_group_idx = 0
+        self.cbs_step_idx = [0] * num_robots
+        self.cbs_return_plans = return_plans
+        self.cbs_return_step_idx = [0] * num_robots
 
     # ------------------------------------------------------------------
     # Static one-shot publishers (called once when entering Stage 4)
@@ -882,6 +979,145 @@ class MACCRvizSim(Node):
         return 'wait'
 
     # ------------------------------------------------------------------
+    # CBS replay (Stage 4 / Stage 5)
+    # ------------------------------------------------------------------
+
+    def _apply_cbs_step(self, r, step, events, t):
+        """Apply a single Step to robot r, updating world/world_sub as needed.
+
+        ``events`` is the per-robot event dict returned by cbs_adapter
+        (keyed by absolute t). ``t`` is the step's absolute t within the
+        current group.
+        """
+        from macc_rviz.cbs_planner import (
+            ACTION_MOVE, ACTION_WAIT, ACTION_PICKUP, ACTION_PLACE,
+        )
+        r.x, r.y, r.z = step.x, step.y, step.z
+        if step.action == ACTION_PICKUP:
+            ev = events.get(t)
+            if ev is not None and ev[0] == 'pickup':
+                r.carrying = True
+                r.carrying_si = ev[1]
+        elif step.action == ACTION_PLACE:
+            ev = events.get(t)
+            if ev is not None and ev[0] == 'place':
+                _, bx, by, bz, si = ev
+                if self.world[bz, by, bx] == 0:
+                    self.world[bz, by, bx] = 1
+                    self.world_sub[bz, by, bx] = si + 1
+            r.carrying = False
+            r.carrying_si = -1
+        # MOVE / WAIT: position already updated; nothing else to do.
+
+    def _tick_cbs(self):
+        """Stage 4 + Stage 5 replay of precomputed CBS plans."""
+        self.tick_count += 1
+        t_abs = self.tick_count
+
+        # Return phase (after build complete and inter-group pause elapsed).
+        if self.build_complete:
+            self._tick_cbs_return()
+            return
+
+        # Inter-group highlight pause.
+        if self.pause_ticks > 0:
+            self.pause_ticks -= 1
+            self.publish_blocks()
+            self.publish_robots()
+            if self.pause_ticks == 0:
+                self.just_completed_sis = set()
+                if self.cbs_group_idx >= len(self.cbs_groups):
+                    self.get_logger().info(
+                        "Final group done. Robots returning to boundary."
+                    )
+                    self.build_complete = True
+            return
+
+        group = self.cbs_groups[self.cbs_group_idx]
+        plans = group['plans']
+        events = group['events']
+
+        # Advance each robot one step (if its plan has one at this group-tick).
+        # Plans use absolute t starting at t_start=0; we consume them linearly.
+        for i, r in enumerate(self.robots):
+            idx = self.cbs_step_idx[i]
+            if idx < len(plans[i]):
+                step = plans[i][idx]
+                self._apply_cbs_step(r, step, events[i], step.t)
+                self.cbs_step_idx[i] = idx + 1
+
+        # Group done when every robot has consumed its plan.
+        group_done = all(
+            self.cbs_step_idx[i] >= len(plans[i])
+            for i in range(len(self.robots))
+        )
+        if group_done:
+            self.just_completed_sis = set(group['metadata']['substructure_indices'])
+            self.cbs_group_idx += 1
+            # Reset per-robot step cursor for next group.
+            self.cbs_step_idx = [0] * len(self.robots)
+            self.get_logger().info(
+                f"[CBS] group {self.cbs_group_idx - 1} replay complete "
+                f"at t={t_abs}."
+            )
+            self.pause_ticks = max(
+                1, int(round(INTER_GROUP_PAUSE_SEC / self.step_duration_sec))
+            )
+
+        self.publish_blocks()
+        self.publish_robots()
+
+    def _tick_cbs_return(self):
+        """Replay the CBS return-to-boundary plan; exit robots at boundary."""
+        plans = self.cbs_return_plans
+        t = self.tick_count
+
+        if self.return_start_tick is None:
+            self.return_start_tick = t
+            self.get_logger().info(
+                f"[CBS] return phase started at t={t} "
+                f"({sum(1 for p in plans if p)} agents moving)"
+            )
+
+        all_done = True
+        for i, r in enumerate(self.robots):
+            if r.id in self.return_done:
+                continue
+            plan = plans[i]
+            idx = self.cbs_return_step_idx[i]
+            if idx < len(plan):
+                step = plan[idx]
+                r.x, r.y, r.z = step.x, step.y, step.z
+                self.cbs_return_step_idx[i] = idx + 1
+
+            on_boundary = (
+                r.x == 0 or r.x == self.X - 1
+                or r.y == 0 or r.y == self.Y - 1
+            )
+            plan_exhausted = self.cbs_return_step_idx[i] >= len(plan)
+            if on_boundary and plan_exhausted:
+                self.return_done.add(r.id)
+                # Park off-grid in the direction of the nearest edge.
+                r.x = r.x - 2 if r.x == 0 else (
+                    r.x + 2 if r.x == self.X - 1 else r.x
+                )
+                r.y = r.y - 2 if r.y == 0 else (
+                    r.y + 2 if r.y == self.Y - 1 else r.y
+                )
+                self.get_logger().info(
+                    f"[CBS][t={t}] Robot {r.id} reached boundary."
+                )
+            else:
+                all_done = False
+
+        self.publish_robots()
+        if all_done:
+            self.get_logger().info(
+                "Construction complete. All robots returned to boundary."
+            )
+            self.timer.cancel()
+
+    # ------------------------------------------------------------------
     # Main timer callback — state machine
     # ------------------------------------------------------------------
 
@@ -938,6 +1174,11 @@ class MACCRvizSim(Node):
         # ----------------------------------------------------------------
         # Stage 4: construction
         # ----------------------------------------------------------------
+
+        # CBS planner: dispatch to precomputed-plan replay.
+        if self.planner == "cbs":
+            self._tick_cbs()
+            return
 
         # Return-to-boundary phase (after build complete and final pause)
         if self.build_complete:
