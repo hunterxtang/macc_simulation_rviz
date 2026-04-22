@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -56,6 +57,14 @@ def generate_launch_description():
         description="Use the hand-built 13-block example structure instead of a random one.",
     )
 
+    # LaunchConfiguration always resolves to a string. For non-string node
+    # parameters, the resolved string is silently rejected by ROS2's
+    # parameter system (type mismatch) and the node falls back to its
+    # declared default. Wrapping with ParameterValue(value_type=...) coerces
+    # the string before dispatch so the override actually lands.
+    def _typed(name, value_type):
+        return ParameterValue(LaunchConfiguration(name), value_type=value_type)
+
     return LaunchDescription([
         planner_arg,
         cbs_max_t_arg,
@@ -72,17 +81,17 @@ def generate_launch_description():
             executable="macc_rviz_sim",
             output="screen",
             parameters=[
-                {"num_robots": LaunchConfiguration("num_robots")},
+                {"num_robots": _typed("num_robots", int)},
                 {"step_duration_sec": 0.4},
-                {"use_example_structure": LaunchConfiguration("use_example_structure")},
-                {"seed": LaunchConfiguration("seed")},
+                {"use_example_structure": _typed("use_example_structure", bool)},
+                {"seed": _typed("seed", int)},
                 {"planner": LaunchConfiguration("planner")},
-                {"cbs_max_t": LaunchConfiguration("cbs_max_t")},
-                {"cbs_branch_limit": LaunchConfiguration("cbs_branch_limit")},
-                {"milp_per_t_time_limit": LaunchConfiguration("milp_per_t_time_limit")},
-                {"milp_total_time_limit": LaunchConfiguration("milp_total_time_limit")},
-                {"milp_mip_gap": LaunchConfiguration("milp_mip_gap")},
-                {"milp_T_max": LaunchConfiguration("milp_T_max")},
+                {"cbs_max_t": _typed("cbs_max_t", int)},
+                {"cbs_branch_limit": _typed("cbs_branch_limit", int)},
+                {"milp_per_t_time_limit": _typed("milp_per_t_time_limit", float)},
+                {"milp_total_time_limit": _typed("milp_total_time_limit", float)},
+                {"milp_mip_gap": _typed("milp_mip_gap", float)},
+                {"milp_T_max": _typed("milp_T_max", int)},
             ],
         ),
     ])
