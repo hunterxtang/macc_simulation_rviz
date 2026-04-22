@@ -21,7 +21,7 @@ The system runs as a 4-stage animated pipeline in RViz:
 3. **Stage 3 — Construction Order.** Each substructure is labeled with its index in the feasible construction order produced by Algorithm 3 (Fig. 1c).
 4. **Stage 4 — Construction.** Cubic robots build the structure substructure-by-substructure following the permissible actions from Section II of the paper: move N/S/E/W, climb up/down one block, pick up, place, wait. Robots and blocks are rendered as same-sized voxel cubes; carried blocks are visibly stacked on top and colored by destination substructure (Fig. 1d).
 
-A new random structure is generated on every launch unless `--seed` is given. Grid dimensions default to 7×7×4.
+By default the sim runs MILP on the 13-block example structure — a fast, deterministic, ~7-second concurrent-multi-robot demo. Pass `use_example_structure:=false` to switch to random generation; grid shape defaults to 5×5×3 at density 0.25 (~19 expected blocks) and is tunable via `grid_x` / `grid_y` / `grid_z` / `density`. Random runs use a fresh seed unless `seed:=` is given.
 
 ## Planners
 
@@ -87,8 +87,8 @@ In separate sourced terminals:
 # Terminal 1: RViz
 rviz2
 
-# Terminal 2: launch the simulation
-ros2 launch macc_rviz macc.launch.py planner:=milp
+# Terminal 2: launch the simulation (defaults to MILP on the 13-block example)
+ros2 launch macc_rviz macc.launch.py
 ```
 
 In RViz, set Fixed Frame to `world` and add MarkerArray displays for the `/macc/*` topics (`blocks`, `robots`, `ghost`, `intro`, `stage_label`, `subtext`). Save the config so you don't have to redo this on each launch.
@@ -97,27 +97,39 @@ In RViz, set Fixed Frame to `world` and add MarkerArray displays for the `/macc/
 
 | Argument | Default | Description |
 |---|---|---|
-| `planner` | `heuristic` | `heuristic`, `cbs`, or `milp` |
-| `use_example_structure` | `false` | Use the deterministic 13-block example instead of random |
+| `planner` | `milp` | `heuristic`, `cbs`, or `milp` |
+| `use_example_structure` | `true` | Use the deterministic 13-block example instead of random |
 | `seed` | *(none, random)* | Seed the random structure for reproducibility |
+| `grid_x` | `5` | Random-structure X extent (ignored when `use_example_structure=true`) |
+| `grid_y` | `5` | Random-structure Y extent |
+| `grid_z` | `3` | Random-structure Z extent |
+| `density` | `0.25` | Per-column height probability; expected blocks ≈ `grid_x*grid_y*grid_z*density` |
 | `cbs_max_t` | `400` | CBS makespan cap before serial fallback |
 | `cbs_branch_limit` | `500` | CBS node expansion limit |
 | `milp_per_t_time_limit` | `60.0` | Per-T solve budget in seconds |
-| `milp_total_time_limit` | `600.0` | Total budget across T-sweep before CBS fallback |
+| `milp_total_time_limit` | `60.0` | Total budget across T-sweep before CBS fallback |
 | `milp_mip_gap` | `0.0` | Gurobi MIP gap (0 = prove optimal) |
-| `milp_T_max` | `150` | Maximum makespan to try before giving up |
+| `milp_T_max` | `40` | Maximum makespan to try before giving up |
 
 ### Examples
 
 ```bash
-# Headline MILP demo on the reproducible 13-block example
-ros2 launch macc_rviz macc.launch.py planner:=milp use_example_structure:=true
+# Default: MILP on the 13-block example — ~7-second concurrent-multi-robot demo
+ros2 launch macc_rviz macc.launch.py
 
-# CBS on a random 7×7×4 structure
-ros2 launch macc_rviz macc.launch.py planner:=cbs seed:=42
+# Small random structure (5×5×3 @ 0.25, ~19 expected blocks)
+ros2 launch macc_rviz macc.launch.py use_example_structure:=false seed:=42
+
+# CBS on the same small random structure (serial-per-block demo)
+ros2 launch macc_rviz macc.launch.py planner:=cbs use_example_structure:=false seed:=42
+
+# Stress-test: reproduce the old 7×7×4 @ 0.4 (~78 blocks) behavior
+ros2 launch macc_rviz macc.launch.py use_example_structure:=false \
+    grid_x:=7 grid_y:=7 grid_z:=4 density:=0.4
 
 # Hybrid MILP→CBS on a larger random structure; expect fallback on big subs
-ros2 launch macc_rviz macc.launch.py planner:=milp seed:=1
+ros2 launch macc_rviz macc.launch.py use_example_structure:=false \
+    grid_x:=7 grid_y:=7 grid_z:=4 density:=0.4 seed:=1
 ```
 
 ## Features

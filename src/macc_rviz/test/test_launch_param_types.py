@@ -41,6 +41,10 @@ EXPECTED_TYPES = {
     'num_robots': int,
     'use_example_structure': bool,
     'seed': int,
+    'grid_x': int,
+    'grid_y': int,
+    'grid_z': int,
+    'density': float,
     'cbs_max_t': int,
     'cbs_branch_limit': int,
     'milp_per_t_time_limit': float,
@@ -171,3 +175,62 @@ def test_launch_param_types_coerced():
         'Launch file dropped non-string params '
         '(silent ROS2 type-mismatch):\n  ' + '\n  '.join(failures)
     )
+
+
+def test_launch_param_values_propagate():
+    """End-to-end: non-default grid/density overrides evaluate to typed values.
+
+    The static test above only checks that each param is wrapped in
+    ParameterValue(value_type=T). This one simulates a CLI override
+    (``grid_x:=7 grid_y:=7 grid_z:=4 density:=0.42``) by seeding the
+    LaunchContext's launch configurations, evaluating the resolved node
+    parameters, and asserting the final Python types and values match.
+    """
+    from launch import LaunchContext
+    from launch.actions import DeclareLaunchArgument
+
+    mod = _load_launch_module()
+    ld = mod.generate_launch_description()
+
+    ctx = LaunchContext()
+    overrides = {
+        'grid_x': '7',
+        'grid_y': '7',
+        'grid_z': '4',
+        'density': '0.42',
+    }
+    # Apply declared-arg defaults first, then layer the CLI-style overrides
+    # on top (mirrors how ros2 launch resolves argument precedence).
+    for entity in ld.entities:
+        if isinstance(entity, DeclareLaunchArgument):
+            entity.visit(ctx)
+    for k, v in overrides.items():
+        ctx.launch_configurations[k] = v
+
+    node = _get_node_action(ld)
+    params = _flatten_param_dicts(node)
+
+    def _evaluate(pv):
+        # ParameterValue exposes an evaluate(context) method that runs
+        # the internal substitutions and applies the declared value_type.
+        return pv.evaluate(ctx)
+
+    expectations = {
+        'grid_x': (int, 7),
+        'grid_y': (int, 7),
+        'grid_z': (int, 4),
+        'density': (float, 0.42),
+    }
+    for name, (expected_type, expected_value) in expectations.items():
+        pv = params[name]
+        if isinstance(pv, tuple) and len(pv) == 1:
+            pv = pv[0]
+        evaluated = _evaluate(pv)
+        assert type(evaluated) is expected_type, (
+            f'{name}: evaluated type {type(evaluated).__name__}, '
+            f'expected {expected_type.__name__}'
+        )
+        assert evaluated == expected_value, (
+            f'{name}: evaluated value {evaluated!r}, '
+            f'expected {expected_value!r}'
+        )

@@ -205,6 +205,12 @@ class MACCRvizSim(Node):
         # seed=-1 means "pick a fresh random seed each run"; any non-negative
         # value is used as-is for reproducibility.
         self.declare_parameter("seed", -1)
+        # Random-structure grid shape + occupancy (only used when
+        # use_example_structure is false).
+        self.declare_parameter("grid_x", 5)
+        self.declare_parameter("grid_y", 5)
+        self.declare_parameter("grid_z", 3)
+        self.declare_parameter("density", 0.25)
         # planner: "heuristic" (reactive per-tick FSM, default) or "cbs"
         # (precomputed conflict-free joint plan via cbs_planner).
         self.declare_parameter("planner", "heuristic")
@@ -221,6 +227,10 @@ class MACCRvizSim(Node):
         self.block_scale = float(self.get_parameter("block_scale").value)
         use_example = bool(self.get_parameter("use_example_structure").value)
         seed_param = int(self.get_parameter("seed").value)
+        grid_x = int(self.get_parameter("grid_x").value)
+        grid_y = int(self.get_parameter("grid_y").value)
+        grid_z = int(self.get_parameter("grid_z").value)
+        density = float(self.get_parameter("density").value)
         self.planner = str(self.get_parameter("planner").value).lower()
         self.cbs_max_t = int(self.get_parameter("cbs_max_t").value)
         self.cbs_branch_limit = int(self.get_parameter("cbs_branch_limit").value)
@@ -247,7 +257,8 @@ class MACCRvizSim(Node):
             self.target = create_example_structure()
             seed = None   # not applicable; log will say so
         else:
-            self.target = create_random_structure(x=7, y=7, z=4, density=0.4, seed=seed)
+            self.target = create_random_structure(
+                x=grid_x, y=grid_y, z=grid_z, density=density, seed=seed)
         self.H, self.Y, self.X = self.target.shape
 
         # --- decomposition (Algorithm 1 + Algorithm 3) ---
