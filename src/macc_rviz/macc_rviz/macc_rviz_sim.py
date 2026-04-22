@@ -1,11 +1,13 @@
 import hashlib
 import random
+import signal
 import time
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from visualization_msgs.msg import Marker, MarkerArray
 from builtin_interfaces.msg import Duration as BuiltinDuration
 
@@ -371,6 +373,26 @@ class MACCRvizSim(Node):
             m.action = Marker.DELETEALL
             ma.markers.append(m)
         pub.publish(ma)
+
+    def _cleanup_markers(self):
+        """Clear every /macc/* MarkerArray display so nothing lingers in RViz after the node exits."""
+        # Cancel the tick timer first so no further ADD markers land on top
+        # of the DELETEALLs we're about to publish (important for latched
+        # topics with depth=1 where a stray ADD would displace the DELETEALL).
+        timer = getattr(self, "timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        robot_ns = [f"robot_{r.id}" for r in getattr(self, "robots", [])]
+        self._deleteall(self.blocks_pub, "blocks")
+        if robot_ns:
+            self._deleteall(self.robots_pub, *robot_ns)
+        self._deleteall(self.ghost_pub, "ghost")
+        self._deleteall(self.text_pub, "subtext")
+        self._deleteall(self.intro_pub, "preview", "suborder")
+        self._deleteall(self.stage_label_pub, "stage_label")
 
     # ------------------------------------------------------------------
     # Intro stage: publishing
@@ -1777,11 +1799,39 @@ class MACCRvizSim(Node):
 
 
 def main():
-    rclpy.init()
+    # Disable rclpy's C-level signal handlers so we can run our marker
+    # cleanup *before* the context shuts down. rclpy's default SIGINT
+    # handler calls rclpy.shutdown() immediately, which invalidates
+    # publishers — DELETEALL messages published afterward never leave
+    # the process.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = MACCRvizSim()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    def _raise_interrupt(signum, frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, _raise_interrupt)
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            node._cleanup_markers()
+            # DDS flushes publishes on its own threads; just give it a
+            # moment rather than spinning the executor (which would re-fire
+            # the tick timer and displace our DELETEALLs on latched topics).
+            time.sleep(0.5)
+        except Exception as e:
+            try:
+                node.get_logger().warn(f"Marker cleanup failed: {e}")
+            except Exception:
+                pass
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
