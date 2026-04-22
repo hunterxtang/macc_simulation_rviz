@@ -292,6 +292,10 @@ class MACCRvizSim(Node):
         # --- world state ---
         self.world = np.zeros_like(self.target, dtype=int)
         self.world_sub = np.zeros_like(self.target, dtype=int)
+        # Last-published occupancy, so publish_blocks can emit DELETE
+        # markers for voxels that dropped from 1 to 0 (e.g. MILP scaffold
+        # teardown).  Without this, stale ADD markers persist in RViz.
+        self._prev_published_world = np.zeros_like(self.target, dtype=int)
 
         # --- task planning: one task-list per parallel group ---
         self.group_task_lists = []
@@ -1704,7 +1708,20 @@ class MACCRvizSim(Node):
         for z in range(self.H):
             for y in range(self.Y):
                 for x in range(self.X):
+                    mid = int(z) * self.Y * self.X + int(y) * self.X + int(x)
+
                     if not self.world[z, y, x]:
+                        # Voxel that was previously published as occupied
+                        # but is now empty (e.g. MILP scaffold teardown):
+                        # tell RViz to drop the stale marker.
+                        if self._prev_published_world[z, y, x]:
+                            d = Marker()
+                            d.header.frame_id = "world"
+                            d.header.stamp = now
+                            d.ns = "blocks"
+                            d.id = mid
+                            d.action = Marker.DELETE
+                            ma.markers.append(d)
                         continue
 
                     si = self.world_sub[z, y, x] - 1   # 0-indexed
@@ -1718,7 +1735,6 @@ class MACCRvizSim(Node):
                         bc = min(1.0, bc * 1.6)
                         alpha = 1.0
 
-                    mid = int(z) * self.Y * self.X + int(y) * self.X + int(x)
                     m = Marker()
                     m.header.frame_id = "world"
                     m.header.stamp = now
@@ -1740,6 +1756,7 @@ class MACCRvizSim(Node):
                     ma.markers.append(m)
 
         self.blocks_pub.publish(ma)
+        np.copyto(self._prev_published_world, self.world)
 
     def publish_robots(self):
         now = self.get_clock().now().to_msg()
