@@ -149,6 +149,24 @@ def _pad_idle_robots_with_waits(
             plans[ri].append(Step(ACTION_WAIT, x, y, z, tt))
 
 
+def _idle_robot_vertex_constraints(idle_positions, from_t, to_t):
+    """Build A* vertex constraints so the active robot avoids parked peers.
+
+    ``idle_positions`` is a list of (x, y) cells — one per idle robot.  Each
+    cell is forbidden for every tick in ``[from_t, to_t]`` inclusive, so the
+    active robot's single-agent A* will route around them instead of
+    walking through their WAIT padding.
+
+    Duplicates (multiple idle robots sharing a cell) collapse inside the
+    set.  Returns ``frozenset`` for consumption by ``space_time_astar``.
+    """
+    constraints = set()
+    for (x, y) in idle_positions:
+        for t in range(from_t, to_t + 1):
+            constraints.add((x, y, t))
+    return frozenset(constraints)
+
+
 def _flatten_blocks_round_robin(assignments):
     """Interleave per-robot block queues into a global per-block schedule.
 
@@ -273,9 +291,26 @@ def plan_group(
             ),
         )
 
+        # Idle robots sit at their cur_starts for the full duration of
+        # the active robot's trip.  Inject those cells as vertex
+        # constraints so A* routes around them instead of walking
+        # through their WAIT padding (pre-fix: empty frozenset here,
+        # which let the active robot overlap parked peers on
+        # example_structure — 14 vertex conflicts observed).  The
+        # ``blocked_xy`` set steers ``_placement_cell`` away from those
+        # same cells, since an A*-unreachable placement neighbour would
+        # cause the whole block to be dropped.
+        idle_positions = [
+            cur_starts[j] for j in range(num_robots) if j != ri
+        ]
+        idle_constraints = _idle_robot_vertex_constraints(
+            idle_positions, cur_t, max_t,
+        )
+        idle_xy_set = frozenset(idle_positions)
+
         result = cbs_planner._build_robot_plan(
             cur_starts[ri], [block], block_hm, depots[ri],
-            cur_t, frozenset(), max_t,
+            cur_t, idle_constraints, max_t, blocked_xy=idle_xy_set,
         )
         if result is None or not result[0]:
             # Single-block plan failed (unreachable target / depot or

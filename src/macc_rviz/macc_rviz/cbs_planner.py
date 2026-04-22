@@ -222,12 +222,17 @@ def _cell_at_time(start_xy, steps, t):
     return result
 
 
-def _placement_cell(bx, by, bz, robot_xy, hm):
+def _placement_cell(bx, by, bz, robot_xy, hm, blocked_xy=frozenset()):
     """Nearest valid 4-neighbour of (bx, by) from which to place at z=bz.
 
-    Valid means in-bounds and reachable (height within ±1 of bz).
-    Falls back to any in-bounds neighbour if none meet the height test.
-    Returns None if (bx, by) is on the grid boundary with no neighbours.
+    Valid means in-bounds and reachable (height within ±1 of bz).  Cells
+    in ``blocked_xy`` are skipped — used by serial-per-block planning to
+    steer away from neighbours that are permanently occupied by idle
+    peer robots (A* wouldn't be able to reach them anyway).
+
+    Falls back to any in-bounds unblocked neighbour if none meet the
+    height test.  Returns None when every neighbour is out-of-bounds or
+    blocked.
     """
     Y, X = hm.shape
     rx, ry = robot_xy
@@ -235,6 +240,8 @@ def _placement_cell(bx, by, bz, robot_xy, hm):
     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
         nx, ny = bx + dx, by + dy
         if not (0 <= nx < X and 0 <= ny < Y):
+            continue
+        if (nx, ny) in blocked_xy:
             continue
         relaxed.append((nx, ny))
         if abs(int(hm[ny, nx]) - bz) <= 1:
@@ -246,7 +253,7 @@ def _placement_cell(bx, by, bz, robot_xy, hm):
 
 
 def _build_robot_plan(robot_start, blocks, hm, depot, t_start,
-                      constraints, max_t):
+                      constraints, max_t, blocked_xy=frozenset()):
     """Plan a single robot's full trajectory through all its assigned blocks.
 
     For each block the robot navigates to the depot, picks up, navigates
@@ -262,6 +269,10 @@ def _build_robot_plan(robot_start, blocks, hm, depot, t_start,
     t_start     : absolute timestep at which robot is at robot_start.
     constraints : set/frozenset of vertex/edge constraint tuples.
     max_t       : hard time horizon for each A* call.
+    blocked_xy  : set/frozenset of (x, y) cells permanently off-limits
+                  for the whole trip (e.g. idle peer robots' parked
+                  positions).  Passed through to ``_placement_cell`` so
+                  an unreachable placement neighbour is never chosen.
 
     Returns
     -------
@@ -296,7 +307,7 @@ def _build_robot_plan(robot_start, blocks, hm, depot, t_start,
         events[t] = ('pickup', -1, -1, -1, si)
 
         # 3. Navigate to placement cell
-        pcell = _placement_cell(bx, by, bz, cur, hm)
+        pcell = _placement_cell(bx, by, bz, cur, hm, blocked_xy=blocked_xy)
         if pcell is None:
             return None
         if cur != pcell:
@@ -369,6 +380,12 @@ def _serial_fallback(robot_starts, block_assignments, hm, depot, t_start,
 
     Accepts per-robot ``depots`` (list of (x, y)) mirroring ``cbs_plan``.
     Falls back to the single shared ``depot`` when ``depots`` is None.
+
+    While robot i plans its trip, every other robot j is parked at a
+    known cell: j < i are at ``plans[j][-1]`` (their final position from
+    a previous iteration), j > i are still at ``robot_starts[j]``.  Those
+    parked cells are injected as vertex constraints so robot i's A* will
+    route around them instead of walking through them.
     """
     n = len(robot_starts)
     if depots is None:
@@ -385,8 +402,26 @@ def _serial_fallback(robot_starts, block_assignments, hm, depot, t_start,
             plans.append([])
             events_per_robot.append({})
             continue
+
+        idle_positions = []
+        for j in range(n):
+            if j == i:
+                continue
+            if j < i and plans[j]:
+                last = plans[j][-1]
+                idle_positions.append((last.x, last.y))
+            else:
+                idle_positions.append(robot_starts[j])
+        idle_constraints = set()
+        for (x, y) in idle_positions:
+            for tt in range(t, max_t + 1):
+                idle_constraints.add((x, y, tt))
+        idle_constraints = frozenset(idle_constraints)
+        idle_xy_set = frozenset(idle_positions)
+
         result = _build_robot_plan(
-            start, blocks, hm, depots[i], t, frozenset(), max_t,
+            start, blocks, hm, depots[i], t, idle_constraints, max_t,
+            blocked_xy=idle_xy_set,
         )
         if result is None:
             # Unreachable goal — treat as empty plan
