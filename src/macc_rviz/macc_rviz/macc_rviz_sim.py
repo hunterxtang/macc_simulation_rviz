@@ -199,6 +199,16 @@ class MACCRvizSim(Node):
             MarkerArray, "/macc/stage_label", _latched
         )
 
+        # Wipe any stale markers left in RViz by a previous sim run before
+        # this run's ADD markers start streaming. Must happen before any
+        # publish_* call — DELETEALL on a topic clears every namespace RViz
+        # has received for it, regardless of ns.
+        self._wipe_all_topics()
+
+        # Set once all robots have reached the boundary (or timed out); main()
+        # polls this to exit spin() cleanly instead of idling forever.
+        self.sim_done = False
+
         # --- parameters ---
         self.declare_parameter("num_robots", 4)
         self.declare_parameter("step_duration_sec", STEP_DURATION_SEC)
@@ -378,6 +388,20 @@ class MACCRvizSim(Node):
             ma.markers.append(m)
         pub.publish(ma)
 
+    def _wipe_all_topics(self):
+        """Publish Marker.DELETEALL on every /macc/* topic.
+
+        DELETEALL tells RViz to drop every marker it has received on the
+        topic regardless of namespace, so one call per publisher is enough
+        to wipe robot_*, carried_*, preview, suborder, etc.
+        """
+        self._deleteall(self.blocks_pub, "blocks")
+        self._deleteall(self.robots_pub, "robots")
+        self._deleteall(self.ghost_pub, "ghost")
+        self._deleteall(self.text_pub, "subtext")
+        self._deleteall(self.intro_pub, "preview")
+        self._deleteall(self.stage_label_pub, "stage_label")
+
     def _cleanup_markers(self):
         """Clear every /macc/* MarkerArray display so nothing lingers in RViz after the node exits."""
         # Cancel the tick timer first so no further ADD markers land on top
@@ -389,14 +413,7 @@ class MACCRvizSim(Node):
                 timer.cancel()
             except Exception:
                 pass
-        robot_ns = [f"robot_{r.id}" for r in getattr(self, "robots", [])]
-        self._deleteall(self.blocks_pub, "blocks")
-        if robot_ns:
-            self._deleteall(self.robots_pub, *robot_ns)
-        self._deleteall(self.ghost_pub, "ghost")
-        self._deleteall(self.text_pub, "subtext")
-        self._deleteall(self.intro_pub, "preview", "suborder")
-        self._deleteall(self.stage_label_pub, "stage_label")
+        self._wipe_all_topics()
 
     # ------------------------------------------------------------------
     # Intro stage: publishing
@@ -1269,6 +1286,7 @@ class MACCRvizSim(Node):
                 "Construction complete. All robots returned to boundary."
             )
             self.timer.cancel()
+            self.sim_done = True
 
     # ------------------------------------------------------------------
     # Main timer callback — state machine
@@ -1379,6 +1397,7 @@ class MACCRvizSim(Node):
                     "Construction complete. All robots returned to boundary."
                 )
                 self.timer.cancel()
+                self.sim_done = True
                 return
 
             # FIX 2: Reservation table contains only robots still inside the grid.
@@ -1478,6 +1497,7 @@ class MACCRvizSim(Node):
                     "Construction complete. All robots returned to boundary."
                 )
                 self.timer.cancel()
+                self.sim_done = True
             return
 
         # Inter-group pause (highlight completed substructures)
@@ -1831,7 +1851,11 @@ def main():
     signal.signal(signal.SIGTERM, _raise_interrupt)
 
     try:
-        rclpy.spin(node)
+        # Poll node.sim_done so main() unwinds as soon as Stage 5 finishes
+        # instead of idling forever after the tick timer cancels itself.
+        # Ctrl+C still interrupts via the signal handlers installed above.
+        while rclpy.ok() and not node.sim_done:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
